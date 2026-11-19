@@ -144,3 +144,9 @@ Orca's durable project metadata might still display the original
 `tibame201020/OpenStockTW` source identity even after the Git origin
 is migrated; the repository's Git `origin` and GitHub remote are
 authoritative for this migration, not the cached project icon.
+**Process-lifecycle finding:** Closing an Orca terminal that started the
+managed Queqiao Worker can terminate that Worker as part of the terminal's
+process-tree cleanup, even if Queqiao was started with `--bg`. Keep the
+supervisor terminal open for this POC. For durable 24/7 operation, install an
+independent OS-level supervisor and re-verify that the Worker receives the
+MCP token environment at startup.
