@@ -15,7 +15,7 @@ export async function POST(req: NextRequest) {
     const session = await getSession();
     if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-    let body: { symbol?: string; side?: OrderSide; qty?: number; orderType?: OrderType; limitPrice?: number };
+    let body: { symbol?: string; side?: OrderSide; qty?: number; orderType?: OrderType; limitPrice?: number; clientOrderId?: string };
     try {
         body = await req.json();
     } catch {
@@ -40,6 +40,7 @@ export async function POST(req: NextRequest) {
             qty: Number(body.qty),
             orderType: body.orderType,
             limitPrice: body.limitPrice !== undefined ? Number(body.limitPrice) : undefined,
+            clientOrderId: body.clientOrderId,
         });
         return NextResponse.json({ order }, { status: order.status === 'rejected' ? 422 : 201 });
     } catch (e) {

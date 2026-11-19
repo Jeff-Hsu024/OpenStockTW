@@ -43,4 +43,13 @@ describe("Paper order preview", () => {
   it("identifies a resting limit order", () => {
     expect(previewPaperOrder({ ...base, orderType: "limit", limitPrice: 90 }).wouldFillImmediatelyInMock).toBe(false);
   });
+  it("evaluates non-marketable limit bids against reservation, not current quote", () => {
+    const order=previewPaperOrder({
+      ...base,qty:10,orderType:"limit",limitPrice:90,cashTWD:950
+    });
+    expect(order.canSubmitToMock).toBe(true);
+    expect(order.estimatedReservationTWD).toBe(920);
+    expect(order.estimatedCashEffectTWD).toBe(-920);
+    expect(order.indicativePriceTWD).toBe(100);
+  });
 });

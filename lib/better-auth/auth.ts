@@ -79,7 +79,9 @@ export const getAuth = async () => {
         throw new Error("MongoDB connection not found!");
     }
 
-    authInstance = createAuth(database);
+    // mongodbAdapter and Mongoose resolve distinct MongoDB 6.x driver minor
+    // versions; their Db types differ only by driver-private declarations.
+    authInstance = createAuth(database as unknown as MongoDb);
     return authInstance;
 }
 

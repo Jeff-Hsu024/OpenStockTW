@@ -5,6 +5,8 @@ import { getQuote } from "@/lib/actions/tw.actions";
 import { getBroker } from "@/lib/trading/broker";
 import { connectToDatabase } from "@/database/mongoose";
 import { DailyBar } from "@/database/models/daily-bar.model";
+import { AgentWatch } from "@/database/models/agent-watch.model";
+import { AgentObservation } from "@/database/models/agent-observation.model";
 import { isAuthorizedMcpRequest, isMcpConfigured, mcpUserId } from "@/lib/mcp/auth";
 import { mcpError, mcpJson } from "@/lib/mcp/format";
 import { previewPaperOrder } from "@/lib/mcp/trading-preview";
@@ -76,7 +78,8 @@ const handler = createMcpHandler((server) => {
     side: sideSchema,
     qty: z.number().int().min(1).max(1_000_000),
     orderType: orderTypeSchema,
-    limitPrice: z.number().positive().optional()
+    limitPrice: z.number().positive().optional(),
+    clientOrderId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$/).optional()
   });
 
   server.registerTool("trading_preview_order", {
@@ -91,21 +94,21 @@ const handler = createMcpHandler((server) => {
     if (!quote?.c) throw new Error("Quote unavailable; cannot preview");
     return previewPaperOrder({
       symbol: stock, side, qty, orderType, limitPrice,
-      lastPrice: quote.c, quoteTimestamp: quote.t, cashTWD: account.cashTWD,
-      heldQty: positions.find(p => p.symbol === stock)?.qty ?? 0
+      lastPrice: quote.c, quoteTimestamp: quote.t, cashTWD: account.availableCashTWD,
+      heldQty: positions.find(p => p.symbol === stock)?.availableQty ?? 0
     });
   }));
 
   server.registerTool("trading_place_order", {
     title: "Place paper order",
     description: "MUTATES virtual paper portfolio. Disabled unless OPENSTOCK_MCP_ENABLE_TRADING=true. No real broker connected.",
-    inputSchema: tradeInput
-  }, ({ symbol, side, qty, orderType, limitPrice }) => wrap(async () => {
+    inputSchema: tradeInput.extend({ clientOrderId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{7,127}$/) })
+  }, ({ symbol, side, qty, orderType, limitPrice, clientOrderId }) => wrap(async () => {
     if (process.env.OPENSTOCK_MCP_ENABLE_TRADING !== "true") {
       throw new Error("MCP paper order writes disabled by OPENSTOCK_MCP_ENABLE_TRADING");
     }
     return getBroker().placeOrder(mcpUserId(), {
-      symbol: validSymbol(symbol), side, qty, orderType, limitPrice
+      symbol: validSymbol(symbol), side, qty, orderType, limitPrice, clientOrderId
     });
   }));
 
@@ -119,7 +122,94 @@ const handler = createMcpHandler((server) => {
     }
     return getBroker().cancelOrder(mcpUserId(), orderId);
   }));
-}, { serverInfo: { name: "openstocktw", version: "0.1.0" } });
+  server.registerTool("trading_match_pending", {
+    title: "Match pending PAPER orders",
+    description: "Matches pending simulated limits for the bound test account using indicative quotes. Requires OPENSTOCK_MCP_ENABLE_TRADING=true.",
+    inputSchema: z.object({ limit: z.number().int().min(1).max(50).default(20) })
+  }, ({limit}) => wrap(async()=>{
+    if (process.env.OPENSTOCK_MCP_ENABLE_TRADING!=="true") throw new Error("Paper matching is disabled");
+    return getBroker().matchPendingOrders({userId:mcpUserId(),limit});
+  }));
+
+  server.registerTool("agent_runner_status", {
+    title: "Read persistent observation worker heartbeat",
+    description: "Returns whether a read-only agent worker heartbeat was observed in the last two minutes.",
+    inputSchema: z.object({})
+  },()=>wrap(async()=>{
+    const connection=await connectToDatabase();
+    const db=connection.connection.db;
+    if (!db) throw new Error("MongoDB not ready");
+    const rows=await db.collection("agentworkerheartbeats").find({
+      lastSeenAt:{$gte:new Date(Date.now()-120000)}
+    }).sort({lastSeenAt:-1}).limit(10).toArray();
+    return {
+      online:rows.length>0,
+      workerCount:rows.length,
+      workers:rows.map(row=>({owner:row.owner,lastSeenAt:row.lastSeenAt,kind:row.kind,pollMs:row.pollMs}))
+    };
+  }));
+
+  server.registerTool("agent_watch_upsert", {
+    title: "Schedule read-only price observations",
+    description: "Durably schedule periodic indicative quote observations. No simulated or real orders are placed.",
+    inputSchema: z.object({
+      symbol:symbolSchema,intervalMinutes:z.number().int().min(5).max(1440).default(15)
+    })
+  }, ({symbol,intervalMinutes})=>wrap(async()=>{
+    const userId=mcpUserId(), stock=validSymbol(symbol);
+    await connectToDatabase();
+    await AgentWatch.init();
+    const existing=await AgentWatch.findOne({userId,symbol:stock});
+    if (!existing && await AgentWatch.countDocuments({userId})>=50) throw new Error("Maximum 50 watches per service account");
+    const watch=await AgentWatch.findOneAndUpdate({userId,symbol:stock},{
+      $set:{active:true,intervalMinutes,nextRunAt:new Date(),lastError:null},
+      $setOnInsert:{userId,symbol:stock}
+    },{upsert:true,new:true});
+    return {id:String(watch?._id),symbol:stock,intervalMinutes,active:true,nextRunAt:watch?.nextRunAt,
+      note:"Read-only observation worker must be running separately."};
+  }));
+
+  server.registerTool("agent_watch_list", {
+    title: "List scheduled agent observations",
+    description: "List read-only market observation watches for the bound account.",
+    inputSchema: z.object({})
+  },()=>wrap(async()=>{
+    await connectToDatabase();
+    const rows=await AgentWatch.find({userId:mcpUserId()}).sort({symbol:1}).lean();
+    return rows.map(r=>({
+      id:String(r._id),symbol:r.symbol,active:r.active,
+      intervalMinutes:r.intervalMinutes,nextRunAt:r.nextRunAt,
+      lastRunAt:r.lastRunAt,lastStatus:r.lastStatus,lastError:r.lastError
+    }));
+  }));
+
+  server.registerTool("agent_watch_pause", {
+    title: "Pause an agent price watch",
+    description: "Disable future observations of one symbol (an in-flight run may finish).",
+    inputSchema: z.object({symbol:symbolSchema})
+  },({symbol})=>wrap(async()=>{
+    await connectToDatabase();
+    const watch=await AgentWatch.findOneAndUpdate(
+      {userId:mcpUserId(),symbol:validSymbol(symbol)},
+      {$set:{active:false}},{new:true});
+    if (!watch) throw new Error("Watch not found");
+    return {symbol:watch.symbol,active:false};
+  }));
+
+  server.registerTool("agent_observations_list", {
+    title: "Read agent observation history",
+    description: "Read persistent quote observations, errors and timestamps; informational only.",
+    inputSchema: z.object({limit:z.number().int().min(1).max(100).default(20)})
+  },({limit})=>wrap(async()=>{
+    await connectToDatabase();
+    const docs=await AgentObservation.find({userId:mcpUserId()})
+      .sort({observedAt:-1}).limit(limit).lean();
+    return docs.map(d=>({
+      id:String(d._id),symbol:d.symbol,status:d.status,scheduledAt:d.scheduledAt,
+      observedAt:d.observedAt,quote:d.quote,detail:d.detail
+    }));
+  }));
+}, { serverInfo: { name: "openstocktw", version: "0.2.0" } });
 
 async function protectedHandler(request: Request): Promise<Response> {
   if (!isMcpConfigured()) {
