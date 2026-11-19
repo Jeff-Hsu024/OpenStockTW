@@ -1,5 +1,9 @@
 # OpenStockTW ↔ Queqiao MCP integration
 
+> The newest transactional broker, durable observation scheduler and Windows
+> scheduled-task procedures are in [AGENT_RUNTIME.md](./AGENT_RUNTIME.md).
+> Earlier acceptance notes below describe the initial read-only POC.
+
 Repository: https://github.com/Jeff-Hsu024/OpenStockTW
 
 ## Architecture

@@ -23,7 +23,8 @@ export function previewPaperOrder(input: OrderPreviewInput) {
   const price = input.lastPrice;
   const marketable = input.orderType === "market" ||
     (input.side === "buy" ? input.limitPrice! >= price : input.limitPrice! <= price);
-  const grossTWD = price * qty;
+  const basisPrice = marketable ? price : input.limitPrice!;
+  const grossTWD = basisPrice * qty;
   const estimatedFeeTWD = calcFee(grossTWD);
   const estimatedTaxTWD = input.side === "sell" ? calcTax(grossTWD) : 0;
   const cashEffectTWD = input.side === "buy"
@@ -36,7 +37,9 @@ export function previewPaperOrder(input: OrderPreviewInput) {
     symbol: input.symbol, side: input.side, qty,
     orderType: input.orderType, limitPrice: input.limitPrice,
     quoteTimestamp: input.quoteTimestamp,
-    indicativePriceTWD: price, grossTWD, estimatedFeeTWD, estimatedTaxTWD,
+    indicativePriceTWD: price, costBasisPriceTWD: basisPrice,
+    estimatedReservationTWD: input.side === "buy" && !marketable ? grossTWD + estimatedFeeTWD : 0,
+    grossTWD, estimatedFeeTWD, estimatedTaxTWD,
     estimatedCashEffectTWD: cashEffectTWD,
     wouldFillImmediatelyInMock: marketable,
     sufficientFunds, sufficientPosition,
